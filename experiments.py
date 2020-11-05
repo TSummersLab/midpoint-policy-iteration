@@ -1,19 +1,15 @@
 import numpy as np
 import numpy.linalg as la
 import numpy.random as npr
-import scipy.linalg as sla
-from midpoint_policy_iteration import get_initial_gains, policy_iteration, midpoint_policy_iteration, verify_are
 
-import sys
-sys.path.insert(0, '../utility')
-from matrixmath import mdot, specrad, solveb, dare_gain, is_pos_def, svec2, smat2, kron, vec
+from utility.matrixmath import dare_gain
+from problem_data_gen import gen_rand_problem_data
+from midpoint_policy_iteration import get_initial_gains, policy_iteration, midpoint_policy_iteration, verify_are
 
 
 def set_numpy_decimal_places(places, width=0):
     set_np = '{0:'+str(width)+'.'+str(places)+'f}'
     np.set_printoptions(formatter={'float': lambda x: set_np.format(x)})
-
-
 
 
 if __name__ == "__main__":

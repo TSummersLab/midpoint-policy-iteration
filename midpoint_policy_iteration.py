@@ -1,12 +1,9 @@
 import numpy as np
 import numpy.linalg as la
 import numpy.random as npr
-import scipy.linalg as sla
 from copy import copy
 
-import sys
-sys.path.insert(0, '../utility')
-from matrixmath import mdot, specrad, solveb, dare_gain, is_pos_def, svec2, smat2, kron, vec
+from utility.matrixmath import mdot, specrad, dare_gain, is_pos_def, svec2, smat2, vec
 
 
 def groupdot(A, x):
@@ -315,7 +312,6 @@ def midpoint_policy_iteration(problem_data, problem_data_known, K0, sim_options=
     return results_dict
 
 
-
 def get_initial_gains(problem_data, initial_gain_method=None, r_min=0.95):
     problem_data_keys = ['A', 'B', 'S']
     A, B, S = [problem_data[key] for key in problem_data_keys]
@@ -346,6 +342,9 @@ def verify_are(problem_data, P, algo_str=None, verbose=True):
     """Verify that the ARE is solved by the solution P"""
     if algo_str is None:
         algo_str = ''
+    problem_data_keys = ['A', 'B', 'S']
+    A, B, S = [problem_data[key] for key in problem_data_keys]
+    n, m = [M.shape[1] for M in [A, B]]
     Q = qfun(problem_data, P=P)
     Qxx = Q[0:n, 0:n]
     Quu = Q[n:n+m, n:n+m]

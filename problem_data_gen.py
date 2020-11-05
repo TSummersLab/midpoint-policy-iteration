@@ -2,11 +2,8 @@ import numpy as np
 import numpy.linalg as la
 import numpy.random as npr
 import scipy.linalg as sla
-from midpoint_policy_iteration import get_initial_gains, policy_iteration, midpoint_policy_iteration, verify_are
 
-import sys
-sys.path.insert(0, '../utility')
-from matrixmath import mdot, specrad, solveb, dare_gain, is_pos_def, svec2, smat2, kron, vec
+from utility.matrixmath import mdot, specrad, solveb, dare_gain, is_pos_def, svec2, smat2, kron, vec
 
 
 def gen_rand_AB(n=4, m=3, rho=None, seed=1, round_places=1):
