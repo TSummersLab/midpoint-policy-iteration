@@ -2,8 +2,9 @@ import numpy as np
 import numpy.linalg as la
 import numpy.random as npr
 from copy import copy
+from warnings import warn
 
-from utility.matrixmath import mdot, specrad, dare_gain, is_pos_def, svec2, smat2, vec
+from utility.matrixmath import mdot, specrad, dare_gain, dlyap, is_pos_def, svec2, smat2, vec
 
 
 def groupdot(A, x):
@@ -22,15 +23,14 @@ def groupquadform(A, x):
     return np.sum(np.dot(x, A)*x, axis=1)
 
 
-def dlyap_direct(A, Q):
-    """
-    Solve the discrete-time Lyapunov equation
-    P = A.T @ P @ A + Q
-    via direct method"""
-    vQ = vec(Q)
-    A2 = np.kron(A.T, A.T)
-    vP = la.solve(np.eye(A.size)-A2, vQ)
-    return np.reshape(vP, A.shape)
+def dlyap_wrap(A, Q, direct=False):
+    if direct:
+        vQ = vec(Q)
+        A2 = np.kron(A, A)
+        vP = la.solve(np.eye(A.size)-A2, vQ)
+        return np.reshape(vP, A.shape)
+    else:
+        return dlyap(A, Q)
 
 
 def rollout(problem_data, K, sim_options):
@@ -38,6 +38,10 @@ def rollout(problem_data, K, sim_options):
     problem_data_keys = ['A', 'B', 'S']
     A, B, S = [problem_data[key] for key in problem_data_keys]
     n, m = [M.shape[1] for M in [A, B]]
+
+    # Check for stability and issue warning if closed-loop unstable
+    if specrad(A + np.dot(B, K)) > 1:
+        warn('Closed-loop unstable in rollout, states will blow up')
 
     sim_options_keys = ['xstd', 'ustd', 'wstd', 'nt', 'nr']
     xstd, ustd, wstd, nt, nr = [sim_options[key] for key in sim_options_keys]
@@ -49,10 +53,9 @@ def rollout(problem_data, K, sim_options):
     # Initialize history data arrays
     x_hist = np.zeros([nr, nt, n])
     u_hist = np.zeros([nr, nt, m])
-    c_hist = np.zeros([nr, nt])
 
-    # Randomly sample additive noise
-    w_all = npr.randn(nt, nr, n)*wstd
+    # Randomly sample an additive noise sequence
+    w_hist = wstd * npr.randn(nt, nr, n)
 
     # Initialize
     x = np.copy(x0)
@@ -62,25 +65,33 @@ def rollout(problem_data, K, sim_options):
         # Compute controls
         u = groupdot(K, x) + u_explore_hist[:, i]
 
-        # Compute cost
-        z = np.hstack([x, u])
-        c = groupquadform(S, z)
-
         # Record history
         x_hist[:, i] = x
         u_hist[:, i] = u
-        c_hist[:, i] = c
 
         # Look up additive noise
-        w = w_all[i]
+        w = w_hist[i]
 
         # Transition the state using additive noise
         x = groupdot(A, x) + groupdot(B, u) + w
 
-    return x_hist, u_hist, c_hist
+    return x_hist, u_hist
 
 
-def qfun(problem_data, problem_data_known=None, P=None, K=None, sim_options=None):
+def rollout_cost(x_hist, u_hist, S):
+    """Compute stage costs associated to a state-input trajectory"""
+    nr, nt = x_hist.shape[0], x_hist.shape[1]
+    c_hist = np.zeros([nr, nt])
+    # Iterate over timesteps
+    for i in range(nt):
+        x = x_hist[:, i] 
+        u = u_hist[:, i]
+        z = np.hstack([x, u])
+        c_hist[:, i] = groupquadform(S, z)
+    return c_hist
+
+
+def qfun(problem_data, problem_data_known=None, P=None, K=None, sim_options=None, sim_data=None):
     """Compute or estimate Q-function matrix"""
     if problem_data_known is None:
         problem_data_known = True
@@ -91,16 +102,20 @@ def qfun(problem_data, problem_data_known=None, P=None, K=None, sim_options=None
     if problem_data_known:
         if P is None:
             IK = np.vstack([np.eye(n), K])
-            P = dlyap_direct(A+B.dot(K), mdot(IK.T, S, IK))
+            AK = A+B.dot(K)
+            P = dlyap_wrap(AK.T, mdot(IK.T, S, IK))
         AB = np.hstack([A, B])
         Q = S + mdot(AB.T, P, AB)
     else:
         nr = sim_options['nr']
         nt = sim_options['nt']
-        qfun_estimator = sim_options['qfun_estimator']
 
-        # Simulation data_files collection
-        x_hist, u_hist, c_hist = rollout(problem_data, K, sim_options)
+        # Check if there is enough data to form a unique least-squares estimate
+        if nt < (n+m)*(n+m+1)/2:
+            warn('Rollout length is %d, should be > %d for unique LS estimate' % (nt, int((n+m)*(n+m+1)/2)))
+
+        qfun_estimator = sim_options['qfun_estimator']
+        x_hist, u_hist, c_hist = sim_data
 
         # Form the data_files matrices
         ns = nr * (nt-1)
@@ -133,21 +148,36 @@ def qfun(problem_data, problem_data_known=None, P=None, K=None, sim_options=None
         elif qfun_estimator == 'lstdq':
             Y = np.zeros(nr*nz)
             Z = np.zeros([nr*nz, nz])
+            # IK = np.vstack([np.eye(n), K])
+            # W = problem_data['W']  # This requires the process noise covariance to be known
+            # f = svec2(mdot(IK, W, IK.T))
             for i in range(nr):
                 lwr = i*nz
                 upr = (i+1)*nz
                 for j in range(nt-1):
                     Y[lwr:upr] += mu_hist[i, j]*c_hist[i, j]
-                    Z[lwr:upr] += np.outer(mu_hist[i, j], mu_hist[i, j]-nu_hist[i, j+1])
+                    # Z[lwr:upr] += np.outer(mu_hist[i, j], mu_hist[i, j] - nu_hist[i, j+1] + f)
+                    Z[lwr:upr] += np.outer(mu_hist[i, j], mu_hist[i, j] - nu_hist[i, j+1])
             # Solve the least squares problem
-            Q_svec2 = la.lstsq(Z, Y, rcond=None)[0]
+            try:
+                Q_svec2 = la.lstsq(Z, Y, rcond=None)[0]
+            except:
+                print(lwr)
+                print(upr)
+                print(mu_hist)
+                print(Y)
+                print(Z)
             Q = smat2(Q_svec2)
         else:
             raise ValueError('Invalid Q-function estimator chosen.')
     return Q
 
 
-def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num_iterations=100, print_iterates=False):
+def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num_iterations=10,
+                     solver=None, known_solve_method='match_approx', use_half_data=False, use_half_compute=False,
+                     use_increasing_rollout_length=False,
+                     offline_training_data=None,
+                     print_iterates=False):
     problem_data_keys = ['A', 'B', 'S']
     A, B, S = [problem_data[key] for key in problem_data_keys]
     n, m = [M.shape[1] for M in [A, B]]
@@ -157,74 +187,51 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
     if specrad(A+B.dot(K0)) > 1:
         raise Exception("Initial policy is not stabilizing!")
 
-    P_history, K_history = [np.zeros([num_iterations, dim, n]) for dim in [n, m]]
+    P_history = np.zeros([num_iterations, n, n])
     H_history = np.zeros([num_iterations, n+m, n+m])
     c_history = np.zeros(num_iterations)
+    K_history = np.zeros([num_iterations+1, m, n])
 
-    print('Policy iteration')
-    for i in range(num_iterations):
-        # Record history
-        K_history[i] = K
+    if solver is None:
+        solver = 'policy_iteration'
 
-        # Policy evaluation
-        IK = np.vstack([np.eye(n), K])
-        P = dlyap_direct(A+B.dot(K), mdot(IK.T, S, IK))
-        H = qfun(problem_data, problem_data_known, P, K, sim_options)
-        Hxx = H[0:n, 0:n]
-        Huu = H[n:n+m, n:n+m]
-        Hux = H[n:n+m, 0:n]
-
-        # Policy improvement
-        K = -la.solve(Huu, Hux)
-
-        # Record history
-        P_history[i] = P
-        H_history[i] = H
-        c_history[i] = np.trace(P)
-        if print_iterates:
-            print('iteration %3d / %3d' % (i+1, num_iterations))
-            print(P)
-    print('')
-    results_dict = {'P': P,
-                    'K': K,
-                    'H': H,
-                    'P_history': P_history,
-                    'K_history': K_history,
-                    'c_history': c_history,
-                    'H_history': H_history}
-    return results_dict
-
-
-def midpoint_policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num_iterations=100,
-                                 print_iterates=False, known_solve_method='match_approx', use_half_data=False):
-    problem_data_keys = ['A', 'B', 'S']
-    A, B, S = [problem_data[key] for key in problem_data_keys]
-    n, m = [M.shape[1] for M in [A, B]]
-    K = np.copy(K0)
-
-    # Check initial policies are stabilizing
-    if specrad(A+B.dot(K0)) > 1:
-        raise Exception("Initial policy is not stabilizing!")
-
-    P_history, K_history = [np.zeros([num_iterations, dim, n]) for dim in [n, m]]
-    H_history = np.zeros([num_iterations, n+m, n+m])
-    c_history = np.zeros(num_iterations)
+    sim_options = copy(sim_options)
 
     if use_half_data:
         sim_options['nt'] = int(sim_options['nt']/2)
 
+    if use_half_compute:
+        num_iterations = int(num_iterations/2)
+
+    if use_increasing_rollout_length:
+        nt_0 = copy(sim_options['nt'])
+
+    def get_sim_data(K, problem_data, offline_training_data, problem_data_known, sim_options):
+        if problem_data_known:
+            sim_data = None
+        else:
+            if offline_training_data is None:
+                x_hist, u_hist = rollout(problem_data, K, sim_options)
+            else:
+                x_hist = offline_training_data[0][0:sim_options['nt']]
+                u_hist = offline_training_data[1][0:sim_options['nt']]
+            c_hist = rollout_cost(x_hist, u_hist, problem_data['S'])
+            sim_data = [x_hist, u_hist, c_hist]
+        return sim_data
+
     # Initial policy evaluation
+    K_history[0] = K0
     IK = np.vstack([np.eye(n), K])
-    P = dlyap_direct(A+B.dot(K), mdot(IK.T, S, IK))
-    H = qfun(problem_data, problem_data_known, P, K, sim_options)
+    AK = A+B.dot(K)
+    P = dlyap_wrap(AK.T, mdot(IK.T, S, IK))
+    sim_data_K = get_sim_data(K, problem_data, offline_training_data, problem_data_known, sim_options)
+    H = qfun(problem_data, problem_data_known, P, K, sim_options, sim_data_K)
 
-    print('Accelerated policy iteration')
-
-    # If the problem data is not known, then force use of the approximate accelerated PI solve method.
+    # If the problem data is not known, then force use of the approximate policy iteration solve method.
     if not problem_data_known:
         known_solve_method = 'match_approx'
 
-    # If the problem data is known, then the accelerated PI solve method may either use
+    # If the problem data is known, then the midpoint PI solve method may either use
     # 'direct' updates which use the value functions directly (simpler updates),
     # or may use the same update equations as used in the approximate case 'match_approx'
     # - both should give identical gains and value function matrices.
@@ -238,70 +245,90 @@ def midpoint_policy_iteration(problem_data, problem_data_known, K0, sim_options=
             return -la.solve(Huu, Hux)
 
         for i in range(num_iterations):
-            K_history[i] = K
-
+            # Check for stability and issue warning if closed-loop unstable
+            if specrad(A+np.dot(B, K)) > 1:
+                raise ValueError('Closed-loop went unstable in policy iteration!')
             # Policy evaluation (reference only)
             IK = np.vstack([np.eye(n), K])
-            Peval = dlyap_direct(A+B.dot(K), mdot(IK.T, S, IK))
+            AK = A+B.dot(K)
+            Peval = dlyap_wrap(AK.T, mdot(IK.T, S, IK))
             P_history[i] = Peval
             c_history[i] = np.trace(Peval)
 
             # Compute the optimal gain matrix associated with the current cost matrix
             K = gain(A, B, S, P)
+            K_history[i+1] = K
 
             # Compute the Newton step next-cost matrix
             AK = A+np.dot(B, K)
             IK = np.vstack([np.eye(n), K])
             QK = mdot(IK.T, S, IK)
-            N = dlyap_direct(AK, QK)
+            N = dlyap_wrap(AK.T, QK)
 
-            # Compute the mid-point cost matrix and associated gain matrix
-            M = (P+N)/2
-            L = gain(A, B, S, M)
-            AL = A+np.dot(B, L)
+            # Conditionally execute the midpoint calculations
+            if solver == 'policy_iteration':
+                P = np.copy(N)
+            elif solver == 'midpoint_policy_iteration':
+                # Compute the mid-point cost matrix and associated gain matrix
+                M = (P+N)/2
+                L = gain(A, B, S, M)
+                AL = A+np.dot(B, L)
 
-            # Compute the mid-point Newton step next-cost matrix
-            QL = mdot(IK.T, S, IK) + mdot(AK.T, P, AK) - mdot(AL.T, P, AL)
-            P = dlyap_direct(AL, QL)
+                # Compute the mid-point Newton step next-cost matrix
+                QL = mdot(IK.T, S, IK) + mdot(AK.T, P, AK) - mdot(AL.T, P, AL)
+                P = dlyap_wrap(AL.T, QL)
+
     elif known_solve_method == 'match_approx':
         for i in range(num_iterations):
-            # Record history
-            K_history[i] = K
+            # Check for stability and issue warning if closed-loop unstable
+            if specrad(A+np.dot(B, K)) > 1:
+                raise ValueError('Closed-loop went unstable in policy iteration!')
 
             # Policy evaluation (reference only)
             IK = np.vstack([np.eye(n), K])
-            P = dlyap_direct(A+B.dot(K), mdot(IK.T, S, IK))
+            AK = A+B.dot(K)
+            P = dlyap_wrap(AK.T, mdot(IK.T, S, IK))
+
+            if use_increasing_rollout_length:
+                sim_options['nt'] = int(nt_0 * ((i+1)**1))
 
             # Newton calculations
-            G = qfun(problem_data, problem_data_known, None, K, sim_options)
+            sim_data_K = get_sim_data(K, problem_data, offline_training_data, problem_data_known, sim_options)
+            G = qfun(problem_data, problem_data_known, None, K, sim_options, sim_data_K)
 
-            # Midpoint calculations
-            F = (G+H)/2
-            Fux = F[n:n+m, 0:n]
-            Fuu = F[n:n+m, n:n+m]
-            L = -la.solve(Fuu, Fux)
+            # Conditionally execute the midpoint calculations
+            if solver == 'policy_iteration':
+                H = np.copy(G)
+            elif solver == 'midpoint_policy_iteration':
+                # Midpoint calculations
+                F = (G+H)/2
+                Fux = F[n:n+m, 0:n]
+                Fuu = F[n:n+m, n:n+m]
+                L = -la.solve(Fuu, Fux)
+                # Midpoint step
+                Y = np.block([[mdot(IK.T, H, IK), np.zeros([n, m])],
+                              [np.zeros([m, n]), np.zeros([m, m])]]) - (H-S)
+                problem_data_mid = copy(problem_data)
+                problem_data_mid['S'] = Y
+                sim_data_L = get_sim_data(L, problem_data_mid, offline_training_data, problem_data_known, sim_options)
+                V = qfun(problem_data_mid, problem_data_known, None, L, sim_options, sim_data_L)
+                H = V + S - Y
 
-            # Midpoint step
-            Y = np.block([[mdot(IK.T, H, IK), np.zeros([n, m])],
-                          [np.zeros([m, n]), np.zeros([m, m])]]) - (H-S)
-            problem_data_mid = copy(problem_data)
-            problem_data_mid['S'] = Y
-            V = qfun(problem_data_mid, problem_data_known, None, L, sim_options)
-
-            # Final
-            H = V + S - Y
+            # Policy improvement
             Hux = H[n:n+m, 0:n]
             Huu = H[n:n+m, n:n+m]
             K = -la.solve(Huu, Hux)
 
             # Record history
+            K_history[i+1] = K
             P_history[i] = P
             H_history[i] = H
             c_history[i] = np.trace(P)
             if print_iterates:
                 print('iteration %3d / %3d' % (i+1, num_iterations))
                 print(P)
-    print('')
+    if print_iterates:
+        print('')
     results_dict = {'P': P,
                     'K': K,
                     'H': H,
@@ -312,7 +339,7 @@ def midpoint_policy_iteration(problem_data, problem_data_known, K0, sim_options=
     return results_dict
 
 
-def get_initial_gains(problem_data, initial_gain_method=None, r_min=0.95):
+def get_initial_gains(problem_data, initial_gain_method=None, frac_tgt=10, bisection_epsilon=1e-3, return_Pare=False):
     problem_data_keys = ['A', 'B', 'S']
     A, B, S = [problem_data[key] for key in problem_data_keys]
     n, m = [M.shape[1] for M in [A, B]]
@@ -326,13 +353,42 @@ def get_initial_gains(problem_data, initial_gain_method=None, r_min=0.95):
         V = S[0:n, n:n+m]
         Pare, Kare = dare_gain(A, B, Q, R, E=None, S=V)
         K0 = Kare
+        if return_Pare:
+            return Kare, Pare
     elif initial_gain_method == 'dare_perturb':
-        K0 = get_initial_gains(problem_data, initial_gain_method='dare')
-        # TODO - change this to make the LQ cost np.trace(P) high, not the specrad
-        r = specrad(A+B.dot(K0))
-        while not r_min < r < 1:
-            K0 = K0 + 0.01*npr.randn(m, n)
-            r = specrad(A+B.dot(K0))
+        Kare, Pare = get_initial_gains(problem_data, initial_gain_method='dare', return_Pare=True)
+        are_cost = np.trace(Pare)
+        c_lwr = 0.0
+        c_upr = 1.0
+        Kdel = npr.randn(m, n)
+        Kdel = Kdel/la.norm(Kdel)
+
+        def eval_frac(c):
+            K = Kare + c*Kdel
+            AK = A+B.dot(K)
+            if specrad(AK) < 1:
+                IK = np.vstack([np.eye(n), K])
+                P = dlyap_wrap(AK.T, mdot(IK.T, S, IK))
+                frac = la.norm(P-Pare, ord=2) / are_cost
+            else:
+                frac = np.inf
+            return frac
+
+        # Start by making K0 de-stabilizing
+        while np.isfinite(eval_frac(c_upr)):
+            c_upr *= 2
+
+        # Do bisection to find K0 that makes initial cost high
+        c_mid = (c_upr+c_lwr) / 2
+        frac = eval_frac(c_mid)
+        while abs(frac-frac_tgt) > bisection_epsilon:
+            c_mid = (c_upr+c_lwr) / 2
+            frac = eval_frac(c_mid)
+            if frac > frac_tgt:
+                c_upr = c_mid
+            else:
+                c_lwr = c_mid
+        K0 = Kare+c_lwr*Kdel
     else:
         raise ValueError('Invalid gain initialization method chosen.')
     return K0
@@ -365,7 +421,3 @@ def verify_are(problem_data, P, algo_str=None, verbose=True):
         print(LHS-RHS)
         print('\n')
     return diff
-
-
-
-
