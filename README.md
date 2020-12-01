@@ -5,7 +5,7 @@
  
  "Approximate Midpoint Policy Iteration for Linear Quadratic Control"
  * [Tech report](https://personal.utdallas.edu/~tyler.summers/papers/AMPI_extended.pdf)
- * arXiv (link tbd)
+ * [arXiv](https://arxiv.org/abs/2011.14212)
  * Learning for Dynamics & Control (L4DC) (under review)
  
  ## Dependencies
