@@ -4,7 +4,7 @@
  The code in this repository implements the algorithms and ideas from our paper:
  
  "Approximate Midpoint Policy Iteration for Linear Quadratic Control"
- * [Proceedings of Machine Learning Research (PMLR) / Learning for Dynamics & Control (L4DC)](http://proceedings.mlr.press/v144/gravell21a.html)
+ * [Proceedings of Machine Learning Research (PMLR) / Learning for Dynamics & Control (L4DC) 2021](http://proceedings.mlr.press/v144/gravell21a.html)
  * [arXiv](https://arxiv.org/abs/2011.14212)
  * [Tech report](https://personal.utdallas.edu/~tyler.summers/papers/AMPI_extended.pdf)
   
