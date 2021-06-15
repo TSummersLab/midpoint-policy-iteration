@@ -4,10 +4,10 @@
  The code in this repository implements the algorithms and ideas from our paper:
  
  "Approximate Midpoint Policy Iteration for Linear Quadratic Control"
- * [Tech report](https://personal.utdallas.edu/~tyler.summers/papers/AMPI_extended.pdf)
+ * [Proceedings of Machine Learning Research (PMLR) / Learning for Dynamics & Control (L4DC)](http://proceedings.mlr.press/v144/gravell21a.html)
  * [arXiv](https://arxiv.org/abs/2011.14212)
- * [2021 Learning for Dynamics & Control (L4DC)](http://proceedings.mlr.press/v144/gravell21a.html)
- 
+ * [Tech report](https://personal.utdallas.edu/~tyler.summers/papers/AMPI_extended.pdf)
+  
  ## Dependencies
 * Python 3.5+ (tested with 3.7.6)
 * NumPy
