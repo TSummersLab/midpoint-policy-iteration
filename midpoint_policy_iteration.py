@@ -1,6 +1,7 @@
 import numpy as np
 import numpy.linalg as la
 import numpy.random as npr
+import scipy.linalg as sla
 from copy import copy
 from warnings import warn
 
@@ -148,20 +149,25 @@ def qfun(problem_data, problem_data_known=None, P=None, K=None, sim_options=None
         elif qfun_estimator == 'lstdq':
             Y = np.zeros(nr*nz)
             Z = np.zeros([nr*nz, nz])
+            # Form the correction term to account for process noise
+            # This requires the process noise covariance W to be known
             # IK = np.vstack([np.eye(n), K])
-            # W = problem_data['W']  # This requires the process noise covariance to be known
+            # W = problem_data['W']
             # f = svec2(mdot(IK, W, IK.T))
             for i in range(nr):
                 lwr = i*nz
                 upr = (i+1)*nz
                 for j in range(nt-1):
                     Y[lwr:upr] += mu_hist[i, j]*c_hist[i, j]
-                    # Z[lwr:upr] += np.outer(mu_hist[i, j], mu_hist[i, j] - nu_hist[i, j+1] + f)
                     Z[lwr:upr] += np.outer(mu_hist[i, j], mu_hist[i, j] - nu_hist[i, j+1])
+                    # Use this line if correcting bias due to process noise
+                    # Z[lwr:upr] += np.outer(mu_hist[i, j], mu_hist[i, j] - nu_hist[i, j+1] + f)
             # Solve the least squares problem
             try:
-                Q_svec2 = la.lstsq(Z, Y, rcond=None)[0]
+                # Q_svec2 = la.lstsq(Z, Y, rcond=None)[0]
+                Q_svec2 = sla.lstsq(Z, Y)[0]
             except:
+                print('Something went wrong when solving least-squares problem in the LSTDQ estimator!')
                 print(lwr)
                 print(upr)
                 print(mu_hist)
@@ -177,7 +183,9 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
                      solver=None, known_solve_method='match_approx', use_half_data=False, use_half_compute=False,
                      use_increasing_rollout_length=False,
                      offline_training_data=None,
-                     print_iterates=False):
+                     share_data_KL=False,
+                     print_iterates=False,
+                     print_diagnostic=False):
     problem_data_keys = ['A', 'B', 'S']
     A, B, S = [problem_data[key] for key in problem_data_keys]
     n, m = [M.shape[1] for M in [A, B]]
@@ -245,9 +253,13 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
             return -la.solve(Huu, Hux)
 
         for i in range(num_iterations):
+            if print_iterates:
+                print('iteration %3d / %3d' % (i+1, num_iterations))
+
             # Check for stability and issue warning if closed-loop unstable
-            if specrad(A+np.dot(B, K)) > 1:
-                raise ValueError('Closed-loop went unstable in policy iteration!')
+            sABK = specrad(A+np.dot(B, K))
+            if sABK > 1:
+                raise ValueError('Closed-loop went unstable in policy iteration! Specrad(A+BK)=%f' % sABK)
             # Policy evaluation (reference only)
             IK = np.vstack([np.eye(n), K])
             AK = A+B.dot(K)
@@ -276,13 +288,19 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
 
                 # Compute the mid-point Newton step next-cost matrix
                 QL = mdot(IK.T, S, IK) + mdot(AK.T, P, AK) - mdot(AL.T, P, AL)
+                if print_diagnostic:
+                    print("eigenvalues of midpoint closed-loop penalty matrix QL % s" % str(np.sort(la.eig(QL)[0])))
                 P = dlyap_wrap(AL.T, QL)
 
     elif known_solve_method == 'match_approx':
         for i in range(num_iterations):
+            if print_iterates:
+                print('iteration %3d / %3d' % (i+1, num_iterations))
+
             # Check for stability and issue warning if closed-loop unstable
-            if specrad(A+np.dot(B, K)) > 1:
-                raise ValueError('Closed-loop went unstable in policy iteration!')
+            sABK = specrad(A+np.dot(B, K))
+            if sABK > 1:
+                raise ValueError('Closed-loop went unstable in policy iteration! Specrad(A+BK)=%f' % sABK)
 
             # Policy evaluation (reference only)
             IK = np.vstack([np.eye(n), K])
@@ -294,7 +312,7 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
 
             # Newton calculations
             sim_data_K = get_sim_data(K, problem_data, offline_training_data, problem_data_known, sim_options)
-            G = qfun(problem_data, problem_data_known, None, K, sim_options, sim_data_K)
+            G = qfun(problem_data, problem_data_known, P=None, K=K, sim_options=sim_options, sim_data=sim_data_K)
 
             # Conditionally execute the midpoint calculations
             if solver == 'policy_iteration':
@@ -310,8 +328,11 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
                               [np.zeros([m, n]), np.zeros([m, m])]]) - (H-S)
                 problem_data_mid = copy(problem_data)
                 problem_data_mid['S'] = Y
-                sim_data_L = get_sim_data(L, problem_data_mid, offline_training_data, problem_data_known, sim_options)
-                V = qfun(problem_data_mid, problem_data_known, None, L, sim_options, sim_data_L)
+                if share_data_KL:
+                    sim_data_L = get_sim_data(L, problem_data_mid, sim_data_K, problem_data_known, sim_options)
+                else:
+                    sim_data_L = get_sim_data(L, problem_data_mid, offline_training_data, problem_data_known, sim_options)
+                V = qfun(problem_data_mid, problem_data_known, P=None, K=L, sim_options=sim_options, sim_data=sim_data_L)
                 H = V + S - Y
 
             # Policy improvement
@@ -324,9 +345,7 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
             P_history[i] = P
             H_history[i] = H
             c_history[i] = np.trace(P)
-            if print_iterates:
-                print('iteration %3d / %3d' % (i+1, num_iterations))
-                print(P)
+
     if print_iterates:
         print('')
     results_dict = {'P': P,
@@ -339,7 +358,7 @@ def policy_iteration(problem_data, problem_data_known, K0, sim_options=None, num
     return results_dict
 
 
-def get_initial_gains(problem_data, initial_gain_method=None, frac_tgt=10, bisection_epsilon=1e-3, return_Pare=False):
+def get_initial_gains(problem_data, initial_gain_method=None, frac_tgt=10, bisection_epsilon=1e-6, return_Pare=False):
     problem_data_keys = ['A', 'B', 'S']
     A, B, S = [problem_data[key] for key in problem_data_keys]
     n, m = [M.shape[1] for M in [A, B]]
@@ -357,7 +376,7 @@ def get_initial_gains(problem_data, initial_gain_method=None, frac_tgt=10, bisec
             return Kare, Pare
     elif initial_gain_method == 'dare_perturb':
         Kare, Pare = get_initial_gains(problem_data, initial_gain_method='dare', return_Pare=True)
-        are_cost = np.trace(Pare)
+        are_cost = la.norm(Pare, ord=2)
         c_lwr = 0.0
         c_upr = 1.0
         Kdel = npr.randn(m, n)
@@ -381,14 +400,15 @@ def get_initial_gains(problem_data, initial_gain_method=None, frac_tgt=10, bisec
         # Do bisection to find K0 that makes initial cost high
         c_mid = (c_upr+c_lwr) / 2
         frac = eval_frac(c_mid)
-        while abs(frac-frac_tgt) > bisection_epsilon:
+        while abs(1-(frac/frac_tgt)) > bisection_epsilon and (c_upr-c_lwr) > bisection_epsilon:
             c_mid = (c_upr+c_lwr) / 2
             frac = eval_frac(c_mid)
             if frac > frac_tgt:
                 c_upr = c_mid
             else:
                 c_lwr = c_mid
-        K0 = Kare+c_lwr*Kdel
+        K0 = Kare + c_lwr*Kdel
+        # print(eval_frac(c_lwr))
     else:
         raise ValueError('Invalid gain initialization method chosen.')
     return K0

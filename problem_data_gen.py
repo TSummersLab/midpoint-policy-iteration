@@ -3,7 +3,7 @@ import numpy.linalg as la
 import numpy.random as npr
 import scipy.linalg as sla
 
-from utility.matrixmath import mdot, specrad, solveb, dare_gain, is_pos_def, svec2, smat2, kron, vec
+from utility.matrixmath import mdot, specrad
 
 
 def gen_rand_pd(n):
